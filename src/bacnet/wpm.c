@@ -119,7 +119,7 @@ int wpm_decode_object_property(
         len += decode_tag_number_and_value(&apdu[len], &tag_number, &len_value);
         if (tag_number == 0) {
             len += decode_enumerated(&apdu[len], len_value, &enum_value);
-            wp_data->object_property = enum_value;
+            wp_data->object_property = (BACNET_PROPERTY_ID)enum_value;
         } else {
             wp_data->error_code = ERROR_CODE_REJECT_INVALID_TAG;
             return BACNET_STATUS_REJECT;
