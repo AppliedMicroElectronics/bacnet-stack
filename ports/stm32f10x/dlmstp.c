@@ -187,6 +187,15 @@ struct mstp_pdu_packet {
 #endif
 static struct mstp_pdu_packet PDU_Buffer[MSTP_PDU_PACKET_COUNT];
 static RING_BUFFER PDU_Queue;
+/* count must be a power of 2 for ringbuf library */
+#ifndef MSTP_BROADCAST_PDU_PACKET_COUNT
+#define MSTP_BROADCAST_PDU_PACKET_COUNT 0
+#endif
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+static struct mstp_pdu_packet
+    Broadcast_PDU_Buffer[MSTP_BROADCAST_PDU_PACKET_COUNT];
+static RING_BUFFER Broadcast_PDU_Queue;
+#endif
 /* This parameter represents the value of the Max_Info_Frames property of */
 /* the node's Device object. The value of Max_Info_Frames specifies the */
 /* maximum number of information frames the node may send before it must */
@@ -194,7 +203,8 @@ static RING_BUFFER PDU_Queue;
 /* nodes. This may be used to allocate more or less of the available link */
 /* bandwidth to particular nodes. If Max_Info_Frames is not writable in a */
 /* node, its value shall be 1. */
-static uint8_t Nmax_info_frames = MSTP_PDU_PACKET_COUNT;
+static uint8_t Nmax_info_frames =
+    MSTP_PDU_PACKET_COUNT + MSTP_BROADCAST_PDU_PACKET_COUNT;
 
 void dlmstp_automac_hander(void);
 
@@ -205,6 +215,10 @@ bool dlmstp_init(char *ifname)
         sizeof(struct mstp_tx_packet), MSTP_TRANSMIT_PACKET_COUNT);
     Ringbuf_Init(&PDU_Queue, (uint8_t *)&PDU_Buffer,
         sizeof(struct mstp_pdu_packet), MSTP_PDU_PACKET_COUNT);
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+    Ringbuf_Init(&Broadcast_PDU_Queue, (uint8_t *)&Broadcast_PDU_Buffer,
+        sizeof(struct mstp_pdu_packet), MSTP_BROADCAST_PDU_PACKET_COUNT);
+#endif
     rs485_init();
     automac_init();
 
@@ -844,14 +858,22 @@ static bool MSTP_Master_Node_FSM(void)
             /* proprietary frames. */
         case MSTP_MASTER_STATE_USE_TOKEN:
             /* Note: We could wait for up to Tusage_delay */
-            if (Ringbuf_Empty(&PDU_Queue)) {
+            if (dlmstp_send_pdu_queue_empty()) {
                 /* NothingToSend */
                 FrameCount = Nmax_info_frames;
                 Master_State = MSTP_MASTER_STATE_DONE_WITH_TOKEN;
                 transition_now = true;
             } else {
                 uint8_t frame_type;
+                /* Give priority to non-broadcast PDUs */
                 pkt = (struct mstp_pdu_packet *)Ringbuf_Peek(&PDU_Queue);
+                RING_BUFFER *pdu_queue = &PDU_Queue;
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+                if (!pkt) {
+                  pkt = (struct mstp_pdu_packet *)Ringbuf_Peek(&Broadcast_PDU_Queue);
+                  pdu_queue = &Broadcast_PDU_Queue;
+                }
+#endif
                 if (pkt->data_expecting_reply) {
                     frame_type = FRAME_TYPE_BACNET_DATA_EXPECTING_REPLY;
                 } else {
@@ -878,7 +900,7 @@ static bool MSTP_Master_Node_FSM(void)
                         Master_State = MSTP_MASTER_STATE_DONE_WITH_TOKEN;
                         break;
                 }
-                (void)Ringbuf_Pop(&PDU_Queue, NULL);
+                (void)Ringbuf_Pop(pdu_queue, NULL);
             }
             break;
         case MSTP_MASTER_STATE_WAIT_FOR_REPLY:
@@ -1248,9 +1270,18 @@ int dlmstp_send_pdu(BACNET_ADDRESS *dest, /* destination address */
 { /* number of bytes of data */
     int bytes_sent = 0;
     struct mstp_pdu_packet *pkt;
+    RING_BUFFER *pdu_queue;
     uint16_t i = 0;
 
-    pkt = (struct mstp_pdu_packet *)Ringbuf_Data_Peek(&PDU_Queue);
+    pdu_queue = &PDU_Queue;
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+    /* check if this is a broadcast */
+    if (!(dest && dest->mac_len && dest->mac[0] != MSTP_BROADCAST_ADDRESS)) {
+        pdu_queue = &Broadcast_PDU_Queue;
+    }
+#endif
+
+    pkt = (struct mstp_pdu_packet *)Ringbuf_Data_Peek(pdu_queue);
     if (pkt) {
         pkt->data_expecting_reply = npdu_data->data_expecting_reply;
         for (i = 0; i < pdu_len; i++) {
@@ -1262,7 +1293,7 @@ int dlmstp_send_pdu(BACNET_ADDRESS *dest, /* destination address */
         } else {
             pkt->destination_mac = MSTP_BROADCAST_ADDRESS;
         }
-        if (Ringbuf_Data_Put(&PDU_Queue, (uint8_t *)pkt)) {
+        if (Ringbuf_Data_Put(pdu_queue, (uint8_t *)pkt)) {
             bytes_sent = pdu_len;
         }
     }
@@ -1273,13 +1304,29 @@ int dlmstp_send_pdu(BACNET_ADDRESS *dest, /* destination address */
 /* returns true if the Send PDU Queue is Empty */
 bool dlmstp_send_pdu_queue_empty(void)
 {
-    return Ringbuf_Empty(&PDU_Queue);
+    if (!Ringbuf_Empty(&PDU_Queue)) {
+        return false;
+    }
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+    if (!Ringbuf_Empty(&Broadcast_PDU_Queue)) {
+        return false;
+    }
+#endif
+    return true;
 }
 
 /* returns true if the Send PDU Queue is Full */
 bool dlmstp_send_pdu_queue_full(void)
 {
-    return Ringbuf_Full(&PDU_Queue);
+    if (!Ringbuf_Full(&PDU_Queue)) {
+        return false;
+    }
+#if MSTP_BROADCAST_PDU_PACKET_COUNT
+    if (!Ringbuf_Full(&Broadcast_PDU_Queue)) {
+        return false;
+    }
+#endif
+    return true;
 }
 
 /* master node FSM states */
